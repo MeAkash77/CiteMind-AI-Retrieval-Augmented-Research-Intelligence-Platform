@@ -1,19 +1,29 @@
 """
 CiteMind AI - Streamlit Web App
-Crafted by Niam
+Crafted by Akash
 Run: streamlit run app.py
 """
 import os
 from pathlib import Path
-
 import streamlit as st
+import time
+import logging
 
-from src.data.loader import DocumentLoader
-from src.data.chunker import Chunker
-from src.retrieval.vectorstore import VectorStore
-from src.generation.rag_engine import RAGEngine
-from src.utils.config import config
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
+# Import from src package
+try:
+    from src.data.loader import DocumentLoader
+    from src.data.chunker import Chunker
+    from src.retrieval.vectorstore import VectorStore
+    from src.generation.rag_engine import RAGEngine
+    from src.utils.config import config
+except ImportError as e:
+    logger.error(f"Failed to import modules: {e}")
+    st.error(f"❌ Failed to import required modules: {e}")
+    st.stop()
 
 # ─────────────────────────────────────────────────────────
 # Page Configuration
@@ -224,71 +234,117 @@ st.markdown("""
         color: rgba(255, 255, 255, 0.75);
         margin-bottom: 0;
     }
+
+    /* Success message styling */
+    .stAlert {
+        background: rgba(16, 185, 129, 0.15) !important;
+        border: 1px solid rgba(16, 185, 129, 0.3) !important;
+        backdrop-filter: blur(10px);
+    }
 </style>
 """, unsafe_allow_html=True)
 
-
-
+# ─────────────────────────────────────────────────────────
+# Persistent Watermark
+# ─────────────────────────────────────────────────────────
 st.markdown(
     '<div class="author-watermark">Made by Akash</div>',
     unsafe_allow_html=True,
 )
 
+# ─────────────────────────────────────────────────────────
+# Initialize Session State with Error Handling
+# ─────────────────────────────────────────────────────────
+def initialize_session():
+    """Initialize session state with proper error handling"""
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+    
+    if "vectorstore" not in st.session_state:
+        try:
+            logger.info("Initializing VectorStore...")
+            st.session_state.vectorstore = VectorStore()
+            logger.info("VectorStore initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize VectorStore: {e}")
+            st.error(f"❌ Database connection error: {e}")
+            st.session_state.vectorstore = None
+    
+    if "indexed_files" not in st.session_state:
+        st.session_state.indexed_files = set()
+    
+    if "initialized" not in st.session_state:
+        st.session_state.initialized = True
+        logger.info("Session initialized")
+
+# Run initialization
+initialize_session()
 
 # ─────────────────────────────────────────────────────────
-# Session State
-# ─────────────────────────────────────────────────────────
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "vectorstore" not in st.session_state:
-    st.session_state.vectorstore = VectorStore()
-if "indexed_files" not in st.session_state:
-    st.session_state.indexed_files = set()
-
-
-# ─────────────────────────────────────────────────────────
-# Helpers
+# Helpers with Enhanced Error Handling
 # ─────────────────────────────────────────────────────────
 @st.cache_resource
 def get_engine(provider: str):
-    return RAGEngine(llm_provider=provider, vectorstore=st.session_state.vectorstore)
-
+    """Get RAG engine with caching and error handling"""
+    try:
+        if st.session_state.vectorstore is None:
+            st.error("❌ Vector store is not initialized. Please restart the app.")
+            return None
+        return RAGEngine(llm_provider=provider, vectorstore=st.session_state.vectorstore)
+    except Exception as e:
+        logger.error(f"Failed to create RAG engine: {e}")
+        st.error(f"❌ Failed to initialize AI engine: {e}")
+        return None
 
 def ingest_uploaded_files(uploaded_files):
+    """Ingest uploaded files with error handling"""
     if not uploaded_files:
+        return 0
+    
+    if st.session_state.vectorstore is None:
+        st.error("❌ Vector store not available. Please restart the app.")
         return 0
 
     upload_dir = Path("data/raw")
     upload_dir.mkdir(parents=True, exist_ok=True)
 
     new_chunks = 0
-    loader = DocumentLoader()
-    chunker = Chunker()
+    try:
+        loader = DocumentLoader()
+        chunker = Chunker()
+    except Exception as e:
+        logger.error(f"Failed to initialize loader/chunker: {e}")
+        st.error(f"❌ Failed to initialize document processing: {e}")
+        return 0
 
     for uploaded in uploaded_files:
         if uploaded.name in st.session_state.indexed_files:
             continue
-        save_path = upload_dir / uploaded.name
-        with open(save_path, "wb") as f:
-            f.write(uploaded.getbuffer())
+        
         try:
+            save_path = upload_dir / uploaded.name
+            with open(save_path, "wb") as f:
+                f.write(uploaded.getbuffer())
+            
             docs = loader.load(str(save_path))
             chunks = chunker.split(docs)
             st.session_state.vectorstore.add_chunks(chunks)
             st.session_state.indexed_files.add(uploaded.name)
             new_chunks += len(chunks)
+            
         except Exception as e:
+            logger.error(f"Failed to process {uploaded.name}: {e}")
             st.error(f"❌ Failed to process {uploaded.name}: {e}")
+            
     return new_chunks
 
-
 def confidence_html(confidence: str) -> str:
+    """Generate confidence HTML badge"""
     icons = {"high": "🟢", "medium": "🟡", "low": "🔴", "none": "⚫"}
     return (
         f'<span class="confidence-{confidence}">'
         f'{icons.get(confidence, "?")} {confidence.upper()}</span>'
     )
-
 
 # ─────────────────────────────────────────────────────────
 # Header
@@ -300,7 +356,6 @@ st.markdown("""
     <span class="badge">Groq · Gemini · ChromaDB · LangChain</span>
 </div>
 """, unsafe_allow_html=True)
-
 
 # ─────────────────────────────────────────────────────────
 # Sidebar
@@ -344,19 +399,32 @@ with st.sidebar:
 
     if uploaded_files and st.button("📥 Index Files", use_container_width=True,
                                      type="primary"):
-        with st.spinner("Processing documents..."):
-            new_chunks = ingest_uploaded_files(uploaded_files)
-        if new_chunks > 0:
-            st.success(f"✅ Indexed {new_chunks} new chunks!")
-            st.rerun()
+        if st.session_state.vectorstore is None:
+            st.error("❌ Vector store not available. Please restart the app.")
         else:
-            st.info("All files already indexed.")
+            with st.spinner("Processing documents..."):
+                new_chunks = ingest_uploaded_files(uploaded_files)
+            if new_chunks > 0:
+                st.success(f"✅ Indexed {new_chunks} new chunks!")
+                st.rerun()
+            else:
+                st.info("All files already indexed or no valid files to process.")
 
     st.divider()
 
     st.markdown('<p class="sidebar-section-title">📊 Index Statistics</p>',
                 unsafe_allow_html=True)
-    total_chunks = st.session_state.vectorstore.count()
+    
+    # Safe count checking
+    try:
+        if st.session_state.vectorstore is not None:
+            total_chunks = st.session_state.vectorstore.count()
+        else:
+            total_chunks = 0
+    except Exception as e:
+        logger.error(f"Failed to get vectorstore count: {e}")
+        total_chunks = 0
+    
     col1, col2 = st.columns(2)
     with col1:
         st.markdown(
@@ -381,7 +449,12 @@ with st.sidebar:
     col_a, col_b = st.columns(2)
     with col_a:
         if st.button("🗑️ Clear Index", use_container_width=True):
-            st.session_state.vectorstore.reset()
+            if st.session_state.vectorstore is not None:
+                try:
+                    st.session_state.vectorstore.reset()
+                except Exception as e:
+                    logger.error(f"Failed to reset vectorstore: {e}")
+                    st.error(f"❌ Failed to clear index: {e}")
             st.session_state.indexed_files = set()
             st.session_state.messages = []
             st.rerun()
@@ -390,10 +463,13 @@ with st.sidebar:
             st.session_state.messages = []
             st.rerun()
 
-
 # ─────────────────────────────────────────────────────────
 # Main Chat Area
 # ─────────────────────────────────────────────────────────
+# Show warning if vectorstore is not initialized
+if st.session_state.vectorstore is None:
+    st.warning("⚠️ Vector store is not initialized. Please restart the application.")
+
 if total_chunks == 0:
     st.markdown(
         '<div style="text-align:center; padding:1rem; color:rgba(255,255,255,0.85);">'
@@ -418,6 +494,7 @@ if total_chunks == 0:
             unsafe_allow_html=True,
         )
 else:
+    # Display chat history
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             if msg["role"] == "user":
@@ -444,47 +521,57 @@ else:
                                 unsafe_allow_html=True,
                             )
 
+    # Chat input
     if question := st.chat_input("Ask a question about your documents..."):
         st.session_state.messages.append({"role": "user", "content": question})
         with st.chat_message("user"):
             st.markdown(question)
 
         with st.chat_message("assistant"):
-            with st.spinner(f"🤔 Thinking with {provider.upper()}..."):
-                engine = get_engine(provider)
-                result = engine.ask(question, top_k=top_k, use_mmr=use_mmr)
+            if st.session_state.vectorstore is None:
+                st.error("❌ Vector store is not available. Please restart the app.")
+            else:
+                with st.spinner(f"🤔 Thinking with {provider.upper()}..."):
+                    try:
+                        engine = get_engine(provider)
+                        if engine is None:
+                            st.error("❌ Failed to initialize AI engine")
+                        else:
+                            result = engine.ask(question, top_k=top_k, use_mmr=use_mmr)
+                            
+                            st.markdown(
+                                f"**{result['provider'].upper()}** · "
+                                f"Confidence: {confidence_html(result['confidence'])} · "
+                                f"⏱️ {result['total_time']}s",
+                                unsafe_allow_html=True,
+                            )
+                            st.markdown(result["answer"])
 
-            st.markdown(
-                f"**{result['provider'].upper()}** · "
-                f"Confidence: {confidence_html(result['confidence'])} · "
-                f"⏱️ {result['total_time']}s",
-                unsafe_allow_html=True,
-            )
-            st.markdown(result["answer"])
-
-            if result["citations"]:
-                with st.expander(f"📚 Sources ({len(result['citations'])})"):
-                    for c in result["citations"]:
-                        st.markdown(
-                            f'<div class="source-card">'
-                            f'<b>[{c["id"]}] {c["source"]}</b> · '
-                            f'page {c["page"]} '
-                            f'<span class="citation-badge">'
-                            f'relevance {c["score"]}</span>'
-                            f'<br><small>{c["text"][:300]}...</small>'
-                            f'</div>',
-                            unsafe_allow_html=True,
-                        )
-
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": result["answer"],
-            "provider": result["provider"],
-            "confidence": result["confidence"],
-            "total_time": result["total_time"],
-            "citations": result["citations"],
-        })
-
+                            if result["citations"]:
+                                with st.expander(f"📚 Sources ({len(result['citations'])})"):
+                                    for c in result["citations"]:
+                                        st.markdown(
+                                            f'<div class="source-card">'
+                                            f'<b>[{c["id"]}] {c["source"]}</b> · '
+                                            f'page {c["page"]} '
+                                            f'<span class="citation-badge">'
+                                            f'relevance {c["score"]}</span>'
+                                            f'<br><small>{c["text"][:300]}...</small>'
+                                            f'</div>',
+                                            unsafe_allow_html=True,
+                                        )
+                            
+                            st.session_state.messages.append({
+                                "role": "assistant",
+                                "content": result["answer"],
+                                "provider": result["provider"],
+                                "confidence": result["confidence"],
+                                "total_time": result["total_time"],
+                                "citations": result["citations"],
+                            })
+                    except Exception as e:
+                        logger.error(f"Error during query: {e}")
+                        st.error(f"❌ An error occurred: {e}")
 
 # ─────────────────────────────────────────────────────────
 # Footer
